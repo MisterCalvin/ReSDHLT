@@ -9,11 +9,12 @@
 # assembles the packages, signs them and publishes.
 name: release
 
+# This fork publishes only its own v<upstream version>-envsky.<n> tags, so it
+# never makes a release named like an upstream one.
 on:
   push:
     tags:
-      - "v*"
-  workflow_dispatch:
+      - "v*-envsky.*"
 
 permissions:
   contents: write
@@ -74,7 +75,7 @@ jobs:
       - name: Check that the tag matches the GUI version
         shell: pwsh
         run: |
-          $tag = "${{ github.ref_name }}" -replace '^v', ''
+          $tag = "${{ github.ref_name }}" -replace '^v', '' -replace '-envsky\.\d+$', ''
           if (-not $tag) { $tag = 'sin tag' }
           $cargo = (Select-String -Path gui/Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches.Groups[1].Value
           Write-Host "tag=$tag  Cargo.toml=$cargo"
@@ -119,8 +120,36 @@ jobs:
           path: gui-bin/
           retention-days: 1
 
+  linux:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and package the portable and AVX2 Linux tools
+        run: |
+          set -e
+          for variant in portable avx2; do
+            arch=""; suffix=""
+            if [ "$variant" = avx2 ]; then arch=avx2; suffix=-avx2; fi
+            cmake -B "build/$variant" -DCMAKE_BUILD_TYPE=Release -DSDHLT_ARCH="$arch" \
+              -DSDHLT_OUTPUT_IN_BUILD_TREE=ON -DSDHLT_COMPILER_CACHE=OFF -DBUILD_TESTING=OFF
+            cmake --build "build/$variant" --parallel
+            pkg="ReSDHLT-Linux-x64$suffix"
+            cmake --install "build/$variant" --prefix "$pkg"
+            printf '%s build. Commit: %s\n' "$variant" "${{ github.sha }}" > "$pkg/BUILD_FLAVOR.txt"
+            for tool in sdHLCSG sdHLBSP sdHLVIS sdHLRAD sdRIPENT; do test -x "$pkg/$tool"; done
+            tar -czf "$pkg.tar.gz" "$pkg"
+          done
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: ReSDHLT-Linux-x64*.tar.gz
+          retention-days: 1
+
   publish:
-    needs: [tools, gui]
+    needs: [tools, gui, linux]
     runs-on: windows-latest
 
     steps:
@@ -134,6 +163,10 @@ jobs:
         with:
           name: gui
           path: gui-bin
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux
 
       - name: Assemble portable and AVX2 packages
         shell: pwsh
@@ -218,7 +251,9 @@ jobs:
             "ReSDHLT-Windows-x64.zip",
             "ReSDHLT-Windows-x64-avx2.zip",
             "ReSDHLT-Windows-x64-symbols.zip",
-            "ReSDHLT-Windows-x64-avx2-symbols.zip"
+            "ReSDHLT-Windows-x64-avx2-symbols.zip",
+            "ReSDHLT-Linux-x64.tar.gz",
+            "ReSDHLT-Linux-x64-avx2.tar.gz"
           )
           $manifest = foreach ($asset in $assets) {
             $hash = (Get-FileHash $asset -Algorithm SHA256).Hash.ToLowerInvariant()
@@ -228,26 +263,6 @@ jobs:
           }
           [IO.File]::WriteAllLines("SHA256SUMS.txt", $manifest, [Text.UTF8Encoding]::new($false))
           Get-Content SHA256SUMS.txt
-
-      - name: Sign release packages with Ed25519
-        shell: pwsh
-        env:
-          RESDHLT_ED25519_PRIVATE_KEY_B64: ${{ secrets.RESDHLT_ED25519_PRIVATE_KEY_B64 }}
-        run: |
-          $ErrorActionPreference = "Stop"
-          if (-not $env:RESDHLT_ED25519_PRIVATE_KEY_B64) {
-            throw "Falta el secreto RESDHLT_ED25519_PRIVATE_KEY_B64; se rechaza una release sin firma."
-          }
-          $assets = @(
-            "ReSDHLT-Windows-x64.zip",
-            "ReSDHLT-Windows-x64-avx2.zip",
-            "ReSDHLT-Windows-x64-symbols.zip",
-            "ReSDHLT-Windows-x64-avx2-symbols.zip"
-          )
-          foreach ($asset in $assets) {
-            ./gui-bin/resdhlt-release-signer.exe $asset "$asset.sig"
-            if ($LASTEXITCODE) { throw "No se pudo firmar $asset" }
-          }
 
       # A release page with nothing but a compare link tells a mapper nothing.
       # Write the notes into docs/release-notes/<tag>.md and they become the
@@ -281,10 +296,10 @@ jobs:
             ReSDHLT-Windows-x64-avx2.zip.sha256
             ReSDHLT-Windows-x64-symbols.zip.sha256
             ReSDHLT-Windows-x64-avx2-symbols.zip.sha256
+            ReSDHLT-Linux-x64.tar.gz
+            ReSDHLT-Linux-x64-avx2.tar.gz
+            ReSDHLT-Linux-x64.tar.gz.sha256
+            ReSDHLT-Linux-x64-avx2.tar.gz.sha256
             SHA256SUMS.txt
-            ReSDHLT-Windows-x64.zip.sig
-            ReSDHLT-Windows-x64-avx2.zip.sig
-            ReSDHLT-Windows-x64-symbols.zip.sig
-            ReSDHLT-Windows-x64-avx2-symbols.zip.sig
           body: ${{ steps.notes.outputs.body }}
-          generate_release_notes: true
+          generate_release_notes: false

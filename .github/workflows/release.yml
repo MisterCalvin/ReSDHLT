@@ -121,7 +121,8 @@ jobs:
           retention-days: 1
 
   linux:
-    runs-on: ubuntu-latest
+    # The oldest supported runner, so the tools run on older glibc versions too.
+    runs-on: ubuntu-22.04
 
     steps:
       - uses: actions/checkout@v4
